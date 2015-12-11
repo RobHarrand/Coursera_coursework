@@ -1,0 +1,167 @@
+---
+title: "Prediction of Exercise Class"
+author: "RH"
+date: "Friday, December 11th, 2015"
+output: html_document
+---
+
+##Loading and cleaning the data
+
+```{r}
+library(caret) #Loads CARET for the machine learning functions
+```
+
+```{r,cache=TRUE}
+#Download and read the training data,
+con = url("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+training = read.csv(con)
+
+#Download and read the testing data,
+con = url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+testing = read.csv(con)
+```
+
+Check to see which, if any, columns contain all NAs, and what % of those are NA,
+
+```{r}
+nas = data.frame(sort(colSums(is.na(training))/length(training$classe)*100, decreasing = TRUE)) #Calculate %
+nas[,1] = round(nas[,1],2) #Round the answers to 2 decimal places
+nas$Names = rownames(nas)
+colnames(nas) = c("Percentage NAs", "Variables") #Rename columns
+table(nas[,1]) #Generate a table of the percentages
+```
+
+The above table shows that 67 columns have ~98% NA and 93 are complete. The following variables are the ones with NAs,
+
+```{r}
+nas[nas[,1] !=0,2] #Show which have NAs
+```
+
+As the percentages are close to 100%, these variables will be deleted (rather than, say, trying to impute the values which 
+may have a chance of success with a far lower percentage of NAs). The same columns are deleted from the testing data,
+
+```{r}
+#Delete the rows from the training data that have some NAs,
+training_na = training[colSums(is.na(training)) == 0]
+
+#Delete the same columns from the testing data,
+testing_na = testing[colSums(is.na(training)) == 0]
+```
+
+Exploring the data further using 'str' revealed many rows containing the text '#DIV/0!'. These are shown below,
+
+```{r}
+sort(colSums(training_na == "#DIV/0!"), decreasing = TRUE) #Which contain '#DIV/0!'?
+```
+
+These numbers of rows are tiny compared to the total number of rows in the training data. Therefore, deleting the columns would
+be extremely wasteful. Instead, the individual rows are deleted,
+
+```{r}
+#Create a dataframe containing the row numbers containing #DIV/0!,
+divs = data.frame(sort(colSums(training_na == "#DIV/0!"), decreasing = TRUE))
+
+ex = divs[divs[,1] != 0,]
+
+#Create a while loop that goes through each column, adding the row numbers that need deleting to a vector, then deleting these rows,
+x=1
+while (x<94){
+        exc.Numbers = training_na[,x] == "#DIV/0!"
+        training_na = training_na[!exc.Numbers, ]
+        x=x+1
+}
+
+#Drop the factor levels still associated with #DIV/0!,
+training_na = droplevels(training_na)
+```
+
+Next, see which of the remaining variables have near zero variation (which indicated poor predictive power), and remove them,
+
+```{r}
+training_na_sub = training_na[-nearZeroVar(training_na)]
+testing_na_sub = testing_na[-nearZeroVar(training_na)]
+```
+
+Looking at the remaining variables, 'X' appears be nothing more than a simple sequence of intergers. Therefore, it is removed.  
+The variables 'raw_timestamp_part_1' and 'raw_timestamp_part_2' also appear to be completely uncorrelated with class. They're
+removed, too. The plot below shows 'raw_timestamp_part_2' vs 'class' as an example,
+
+```{r}
+qplot(training_na_sub$raw_timestamp_part_2, training_na_sub$class, 
+      main = "raw_timestamp_part_2 vs class", xlab = "raw_timestamp_part_2", ylab = "class")
+
+#Remove the remaining unrequired columns,
+training_na_sub$raw_timestamp_part_1 = NULL
+training_na_sub$raw_timestamp_part_2 = NULL
+training_na_sub$X = NULL
+```
+
+The time variable does not need converting into a time format as it only has 20 levels as a factor. These should offer predictive
+power as they are,
+
+```{r}
+str(training_na_sub$cvtd_timestamp)
+```
+
+##Model fitting
+
+The resulting training dataset is then fitted using random forests. A 'leave group out cross validation' of 25% is used, with 5 repeats,
+
+```{r,cache=TRUE} 
+#Cache the model fit, as it takes quite a while to run
+set.seed(100) #Set seed to ensure reproducible results
+fitControl <- trainControl(method = "LGOCV", p=0.25, repeats = 5)
+
+model = train(classe ~ ., data = training_na_sub, 
+              method = "rf",
+              trControl = fitControl,
+              metric = "Accuracy")
+```
+
+The interval CV performance is show using the code below,
+
+```{r}
+getTrainPerf(model) #Internal CV performance
+```
+
+The variable importance from the model is shown in the plot below,
+
+```{r}
+plot(varImp(model))
+```
+
+Predicting the 20 test cases gives,
+
+```{r}
+pred1 = predict(model, testing_na_sub)
+pred1
+```
+
+
+##Out of sample error
+
+The CV is shown in the model performance above (accuracy of 0.991). What about the error from a genuine blind test set?
+Below the training data is split to a training and test set 70/30. The random forest is then applied to the new, smaller 
+training set and the new test set predicted. Finally, these predictions are compred to the actual class in the test set
+using a confusion matrix,
+
+```{r,cache=TRUE} 
+#Cache the model fit, as it takes quite a while to run
+trainIndex = createDataPartition(training_na_sub$classe, p = 0.7, list = FALSE, times = 1)
+training_new = training_na_sub[ trainIndex,]
+testing_new = training_na_sub[-trainIndex,]
+
+set.seed(100) #Set seed to ensure reproducible results
+fitControl <- trainControl(method = "LGOCV", p=0.25, repeats = 5)
+
+model_sub = train(classe ~ ., data = training_new, 
+              method = "rf",
+              trControl = fitControl,
+              metric = "Accuracy")
+
+pred2 = predict(model_sub, testing_new)
+confusionMatrix(pred2, testing_new$classe)
+```
+
+This gives an accuracy of 0.998, which is a fraction better than the internal CV. It also shows a sensitivity and specificity of 1
+or nearly 1 for each of the 5 classes.
